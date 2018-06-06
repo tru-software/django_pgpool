@@ -5,7 +5,7 @@ import time
 import contextlib
 
 import gevent
-from gevent.queue import Queue, Empty
+from gevent.queue import LifoQueue, Empty
 from gevent.socket import wait_read, wait_write
 from psycopg2 import extensions, OperationalError, connect
 
@@ -37,7 +37,7 @@ extensions.set_wait_callback(gevent_wait_callback)
 
 class AbstractDatabaseConnectionPool(object):
 
-    def __init__(self, maxsize=100, maxwait=1.0, maxoverflow=120, expires=None):
+    def __init__(self, maxsize=100, maxwait=1.0, expires=None, cleanup=None):
         """
         The pool manages opened connections to the database. The main strategy is to keep the smallest number
         of alive connections which are required for best web service performance.
@@ -50,9 +50,6 @@ class AbstractDatabaseConnectionPool(object):
         maxsize : int
                   Soft limit of the number of created connections. After reaching this limit
                   taking the next connection first waits `maxwait` time for any returned slot.
-        maxoverflow : int
-                      Hard limit of the created connections. After reaching this limit taking the next
-                      connection results an exception to be raised - `psycopg2.OperationalError`.
         maxwait : float
                   The time in seconds which is to be wait before creating new connection after the pool gets empty.
                   It may be 0 then immediate connections are created til `maxoverflow` is reached.
@@ -62,74 +59,102 @@ class AbstractDatabaseConnectionPool(object):
         """
         if not isinstance(maxsize, integer_types):
             raise TypeError('Expected integer, got %r' % (maxsize, ))
-        if not isinstance(maxoverflow, integer_types):
-            raise TypeError('Expected integer, got %r' % (maxoverflow, ))
-        self.maxsize = maxsize
-        self.maxwait = maxwait
-        self.maxoverflow = maxoverflow
-        self.expires = expires
-        self.created_at = {}
-        self.pool = Queue()
-        self.size = 0
+
+        self._maxsize = maxsize
+        self._maxwait = maxwait
+        self._expires = expires
+        self._cleanup = cleanup
+        self._created_at = {}
+        self._latest_use = {}
+        self._pool = LifoQueue()
+        self._size = 0
+        self._latest_cleanup = 0 if self._expires or self._cleanup else 0xffffffffffffffff
+        self._interval_cleanup = min(self._expires or self._cleanup, self._cleanup or self._expires) if self._expires or self._cleanup else 0
 
     def create_connection(self):
         raise NotImplementedError()
 
-    def get(self):
-        pool = self.pool
-        if self.size >= self.maxsize or pool.qsize():
-            limit = time.time() - self.expires if self.expires else None
-            try:
-                 block = True
-                 while self.size > 0:
-                    item = pool.get(block=block, timeout=self.maxwait)
-                    if limit is not None and self.created_at.get(id(item), 0) < limit:
-                        block = False
-                        try:
-                            self.size = max(self.size-1, 0)
-                            self.created_at.pop(id(item), None)
-                            item.close()
-                            item = None
-                        except Exception:
-                            pass
-                        continue
-                    return item
-            except Empty:
-                pass
+    def close_connection(self, item):
+        try:
+            self._size -= 1
+            self._created_at.pop(id(item), None)
+            self._latest_use.pop(id(item), None)
+            item.close()
+        except Exception:
+            pass
+
+
+    def cleanup(self):
+
+        now = time.time()
+
+        cleanup = now - self._cleanup if self._cleanup else None
+        expires = now - self._expires if self._expires else None
+
+        pool = self._pool
+
+        conns = []
 
         try:
-            # Creation takes some time, therefore due to the concurrent connections needs,
-            # the counter "size" has to be incremented in the first place.
-            self.size += 1
+            for i in range(pool.qsize()):
+                item = pool.get_nowait()
+                if cleanup and self._latest_use.get(id(item), 0) < cleanup:
+                    print("ceaning up after ", now - self._latest_use.get(id(item), 0))
+                    self.close_connection(item)
+                elif expires and self._created_at.get(id(item), 0) < expires:
+                    self.close_connection(item)
+                else:
+                    conns.append(item)
+        except Empty:
+            pass
 
-            if self.size > self.maxoverflow:
-                raise OperationalError("Too many connections created: {} (maxoverflow is {})".format(self.size, self.maxoverflow))
+        for i in reversed(conns):
+            pool.put(i)
 
-            conn = self.create_connection()
-            self.created_at[id(conn)] = time.time()
-            return conn
-        except:
-            self.size -= 1
-            raise
+    def get(self):
 
-    def put(self, item):
-        if self.pool.qsize() >= self.maxsize:
+        try:
+            return self._pool.get_nowait()
+        except Empty:
+            pass
+
+        if self._size < self._maxsize:
             try:
-                item.close()
-            except Exception:
-                pass
-            self.size = max(self.size-1, 0)
+                self._size += 1
+                conn = self.create_connection()
+            except:
+                self._size -= 1
+                raise
+
+            now = time.time()
+            self._created_at[id(conn)] = now
+            self._latest_use[id(conn)] = now
+            return conn
         else:
-            self.pool.put(item)
+            try:
+                item = self._pool.get(timeout=self._maxwait)
+                return item
+            except Empty:
+                raise OperationalError("Too many connections created: {} (maxsize is {})".format(self._size, self._maxsize))
+
+
+    def put(self, conn):
+        self._latest_use[id(conn)] = time.time()
+        self._pool.put_nowait(conn)
+
+        now = time.time()
+        if self._latest_cleanup < now:
+            self.cleanup()
+            self._latest_cleanup = now + self._interval_cleanup
 
     def closeall(self):
-        while not self.pool.empty():
-            conn = self.pool.get_nowait()
+        while not self._pool.empty():
+            conn = self._pool.get_nowait()
             try:
                 conn.close()
             except Exception:
                 pass
-        self.size = 0
+        self._size = 0
 
     @contextlib.contextmanager
     def connection(self, isolation_level=None):
@@ -202,7 +227,7 @@ class PostgresConnectionPool(AbstractDatabaseConnectionPool):
 
     def __init__(self, *args, **kwargs):
         self.connect = kwargs.pop('connect', connect)
-        pool_kwargs = {i: kwargs.pop(i) for i in ('maxsize', 'maxwait', 'maxoverflow', 'expires') if i in kwargs}
+        pool_kwargs = {i: kwargs.pop(i) for i in ('maxsize', 'maxwait', 'expires', 'cleanup') if i in kwargs}
         self.args = args
         self.kwargs = kwargs
         AbstractDatabaseConnectionPool.__init__(self, **pool_kwargs)
@@ -212,35 +237,7 @@ class PostgresConnectionPool(AbstractDatabaseConnectionPool):
 
 
 def main():
-    dsn = "dbname=template1 user=postgres"
-    import time
-    pool = PostgresConnectionPool(dsn, maxsize=3, maxoverflow=3, maxwait=10)
-    print('1. Running "select pg_sleep(1);" 4 times with 3 connections. Should take about 2 seconds...')
-    start = time.time()
-    for _ in range(4):
-        gevent.spawn(pool.execute, 'select pg_sleep(1);')
-    gevent.wait()
-    delay = time.time() - start
-    print('Got %.2fs'%delay)
-    pool.closeall()
-
-    print('2. Running "select pg_sleep(1);" and reaching the overflow exception')
-    def exec_sleep():
-        try:
-            pool.execute('select pg_sleep(1);')
-            exec_sleep.passed += 1
-        except OperationalError:
-            exec_sleep.raised += 1
-
-    exec_sleep.passed = 0
-    exec_sleep.raised = 0
-    pool = PostgresConnectionPool(dsn, maxsize=3, maxoverflow=5, maxwait=0.01)
-    idx = 0
-    for idx in range(8):
-        gevent.spawn(exec_sleep)
-    gevent.wait()
-    print('Passed %d (should be 5), failed %d (should be 3)' % (exec_sleep.passed, exec_sleep.raised))
-
+    pass
 
 if __name__ == '__main__':
     main()
