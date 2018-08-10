@@ -99,7 +99,6 @@ class AbstractDatabaseConnectionPool(object):
             for i in range(pool.qsize()):
                 item = pool.get_nowait()
                 if cleanup and self._latest_use.get(id(item), 0) < cleanup:
-                    print("ceaning up after ", now - self._latest_use.get(id(item), 0))
                     self.close_connection(item)
                 elif expires and self._created_at.get(id(item), 0) < expires:
                     self.close_connection(item)
