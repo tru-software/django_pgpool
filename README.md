@@ -5,26 +5,23 @@ The main strategy is to keep the **smallest number** of alive connections which 
 Therefore, the priority is: **1. service availability**, **2. performance**, **3. lowest possible resources usage**.
 
 In most cases (avarage usage) connections are taken from the pool. In case of views-peeks (high load), pool creates some
-extra resources (see `maxoverflow`) preventing service gone unavailable. In time of low traffic (night) all unnecessary
-connections are released up to latest one connection (`expires`).
+extra resources (see `maxsize` and `maxwait`) preventing service gone unavailable. In time of low traffic (night) all unnecessary connections are released up (`expires` + `cleanup`).
 
 ## Parameters
 * `maxsize` : `int`
-Soft limit of the number of created connections. After reaching this limit taking the next connection first waits `maxwait` time for any returned slot.
-The value should be the top number of required connections used by django instance at the same time. 
-
-* `maxoverflow` : `int`
-Hard limit of the created connections. After reaching this limit taking the next
-connection results an exception - `psycopg2.OperationalError`.
+Hard limit of the number of created connections. After reaching this limit taking the next connection first waits `maxwait` time for any returned slot.
+The value should be the top number of available connections for django instance.
 
 * `maxwait` : `float`
-The time in seconds which is to be wait before creating new connection after the pool gets empty.
-It may be `0` then immediate connections are created til `maxoverflow` is reached.
+The time in seconds which is to be wait before raising an exception after the pool gets empty. 
 
 * `expires` : `float`
 The time in seconds indicates how long connection should stay alive.
-It is used to close unneeded slots.
+It is used to recycle connections.
 
+* `cleanup` : `float`
+The time in seconds indicates how long connection may wait for next use.
+It is used to close unneeded slots.
 
 ## Requirements
 * Python2 or Python3
@@ -52,21 +49,20 @@ DATABASES = {
 		'ATOMIC_REQUESTS': False,
 		'CONN_MAX_AGE': 0,
 		'OPTIONS': {
-			'maxsize': 2,
-			'maxwait': 0.2,
-			'maxoverflow': 20,
-			'expires': 10 * 60
+			'maxsize': 20,    # up to 20 connections might be created at the same time
+			'maxwait': 10.0,  # after reaching 20 conns, 10.0s is a time to wait for next free slot
+			'expires': 60*5,  # connection may live up to 5minutes
+			'cleanup': 20     # if connection is not used for 20s it shuold be terminanted
 		}
 	}
 }
 ```
 The above example creates a pool which acts a follow:
 * at the beginning the pool is empty
-* requested connections are returned to the pool, which is the size of `2`
-* if in the same time `2` connections are in use and another one is requested:
-  * pool waits `0.2`sec for any available connection then creates new one
-  * connections are created til number of all reaches the limit `20`, then exception is risen
-  * first 2 released connections are returned to the pool
-  * third (extra connection) after release is closed immediately
-* each connection may live only `10`minutes - requesting new connection closes expired ones
-* requesting only one connection at time, after `10`minutes, the pool will remains with only one connection
+* requested connections are returned to the pool
+* if in the same time `20` connections are in use and another one is requested:
+  * pool waits `10.0`sec for any available connection
+  * after `10.0`sec an exception is risen
+  * after `20` connections no more is going to be created
+* each connection may live at least `5`minutes - expired are simply closed
+* on low-traffic period, if connection hasn't been used for `20s` it would be terminated
