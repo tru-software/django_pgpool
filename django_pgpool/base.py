@@ -201,6 +201,9 @@ class DatabaseWrapperMixin17(object):
             self.closed_in_transaction = True
             self.needs_rollback = True
 
+    def close_if_unusable_or_obsolete(self):
+        self.pool.cleanup()
+
 
 if django.VERSION >= (1, 7):
     class DatabaseWrapperMixin(DatabaseWrapperMixin17, DatabaseWrapperMixin16):
