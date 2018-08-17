@@ -141,14 +141,17 @@ class DatabaseWrapperMixin16(object):
     def pool(self):
         if self._pool is not None:
             return self._pool
-        connection_pools_lock.acquire()
-        if not self.alias in connection_pools:
-            self._pool = psypool.PostgresConnectionPool(
-                **self.get_connection_params())
-            connection_pools[self.alias] = self._pool
-        else:
-            self._pool = connection_pools[self.alias]
-        connection_pools_lock.release()
+
+        with connection_pools_lock:
+            if self._pool is not None:
+                return self._pool
+
+            if not self.alias in connection_pools:
+                self._pool = psypool.PostgresConnectionPool(**self.get_connection_params())
+                connection_pools[self.alias] = self._pool
+            else:
+                self._pool = connection_pools[self.alias]
+
         return self._pool
 
     def get_new_connection(self, conn_params):

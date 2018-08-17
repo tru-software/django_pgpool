@@ -9,6 +9,11 @@ from gevent.queue import LifoQueue, Empty
 from gevent.socket import wait_read, wait_write
 from psycopg2 import extensions, OperationalError, connect
 
+try:
+    from gevent.lock import Semaphore
+except ImportError:
+    from eventlet.semaphore import Semaphore
+
 
 if sys.version_info[0] >= 3:
     integer_types = (int,)
@@ -70,6 +75,7 @@ class AbstractDatabaseConnectionPool(object):
         self._size = 0
         self._latest_cleanup = 0 if self._expires or self._cleanup else 0xffffffffffffffff
         self._interval_cleanup = min(self._expires or self._cleanup, self._cleanup or self._expires) if self._expires or self._cleanup else 0
+        self._cleanup_lock = Semaphore(value=1)
 
     def create_connection(self):
         raise NotImplementedError()
@@ -83,32 +89,50 @@ class AbstractDatabaseConnectionPool(object):
         except Exception:
             pass
 
-
     def cleanup(self):
+        self._cleanup_queue(time.time())
 
-        now = time.time()
+    def _cleanup_queue(self, now):
 
-        cleanup = now - self._cleanup if self._cleanup else None
-        expires = now - self._expires if self._expires else None
+        if self._latest_cleanup > now:
+            return
 
-        pool = self._pool
+        with self._cleanup_lock:
 
-        conns = []
+            if self._latest_cleanup > now:
+                 return
 
-        try:
-            for i in range(pool.qsize()):
-                item = pool.get_nowait()
-                if cleanup and self._latest_use.get(id(item), 0) < cleanup:
-                    self.close_connection(item)
-                elif expires and self._created_at.get(id(item), 0) < expires:
-                    self.close_connection(item)
-                else:
-                    conns.append(item)
-        except Empty:
-            pass
+            self._latest_cleanup = now + self._interval_cleanup
 
-        for i in reversed(conns):
-            pool.put(i)
+            cleanup = now - self._cleanup if self._cleanup else None
+            expires = now - self._expires if self._expires else None
+
+            old_pool, self._pool = self._pool, LifoQueue()
+
+            try:
+                # try to fill self._pool ASAP, preventing creation of new connections.
+                # because of LIFO there will be reversed order after this loop
+                while not old_pool.empty():
+                    item = old_pool.get_nowait()
+                    if cleanup and self._latest_use.get(id(item), 0) < cleanup:
+                        self.close_connection(item)
+                    elif expires and self._created_at.get(id(item), 0) < expires:
+                        self.close_connection(item)
+                    else:
+                        self._pool.put_nowait(i)
+            except Empty:
+                pass
+
+            if self._pool.qsize() < 2:
+                return
+
+            # Reverse order back (fresh connections shuold be at the front)
+            old_pool, self._pool = self._pool, LifoQueue()
+            try:
+                while not old_pool.empty():
+                    self._pool.put_nowait(old_pool.get_nowait())
+            except Empty:
+                pass
 
     def get(self):
 
@@ -138,13 +162,11 @@ class AbstractDatabaseConnectionPool(object):
 
 
     def put(self, conn):
-        self._latest_use[id(conn)] = time.time()
-        self._pool.put_nowait(conn)
-
         now = time.time()
-        if self._latest_cleanup < now:
-            self.cleanup()
-            self._latest_cleanup = now + self._interval_cleanup
+        self._pool.put_nowait(conn)
+        self._latest_use[id(conn)] = now
+
+        self._cleanup_queue(now)
 
     def closeall(self):
         while not self._pool.empty():

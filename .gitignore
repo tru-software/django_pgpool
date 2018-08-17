@@ -8,3 +8,4 @@ dist/
 __pycache__
 .eggs
 *.egg-info/
+.pytest_cache/
