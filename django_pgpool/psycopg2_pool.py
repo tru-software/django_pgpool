@@ -119,7 +119,7 @@ class AbstractDatabaseConnectionPool(object):
                     elif expires and self._created_at.get(id(item), 0) < expires:
                         self.close_connection(item)
                     else:
-                        self._pool.put_nowait(i)
+                        self._pool.put_nowait(item)
             except Empty:
                 pass
 
