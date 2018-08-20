@@ -204,7 +204,7 @@ class DatabaseWrapperMixin17(object):
             self.closed_in_transaction = True
             self.needs_rollback = True
 
-    def close_if_unusable_or_obsolete(self):
+    def close_too_old(self):
         self.pool.cleanup()
 
 
