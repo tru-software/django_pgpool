@@ -7,9 +7,9 @@ import psycopg2.extensions
 try:
     from gevent.lock import Semaphore
 except ImportError:
-    from eventlet.semaphore import Semaphore
+    from eventlet.semaphore import Semaphore  # noqa
 
-from django.db.backends.postgresql.base import CursorWrapper, DatabaseWrapper as OriginalDatabaseWrapper, utc_tzinfo_factory
+from django.db.backends.postgresql.base import DatabaseWrapper as OriginalDatabaseWrapper, utc_tzinfo_factory
 
 from django.db.backends.signals import connection_created
 from django.conf import settings
@@ -44,7 +44,7 @@ class DatabaseWrapperMixin16(object):
             if self._pool is not None:
                 return self._pool
 
-            if not self.alias in connection_pools:
+            if self.alias not in connection_pools:
                 self._pool = psypool.PostgresConnectionPool(**self.get_connection_params())
                 connection_pools[self.alias] = self._pool
             else:
@@ -70,7 +70,7 @@ class DatabaseWrapperMixin16(object):
             return  # no need to close anything
         try:
             self._close()
-        except:
+        except BaseException:
             # In some cases (database restart, network connection lost etc...)
             # the connection to the database is lost without giving Django a
             # notification. If we don't set self.connection to None, the error
@@ -105,8 +105,6 @@ class DatabaseWrapperMixin17(object):
     def close_too_old(self):
         self.pool.cleanup()
 
-
-    
 
 class DatabaseWrapper(DatabaseWrapperMixin17, DatabaseWrapperMixin16, OriginalDatabaseWrapper):
     pass
