@@ -15,11 +15,7 @@ except ImportError:
     from eventlet.semaphore import Semaphore
 
 
-if sys.version_info[0] >= 3:
-    integer_types = (int,)
-else:
-    import builtins
-    integer_types = (int, builtins.long)  # noqa
+integer_types = (int,)
 
 
 def gevent_wait_callback(conn, timeout=None):
@@ -107,32 +103,27 @@ class AbstractDatabaseConnectionPool(object):
             cleanup = now - self._cleanup if self._cleanup else None
             expires = now - self._expires if self._expires else None
 
-            old_pool, self._pool = self._pool, LifoQueue()
+            # Instead of creating new LIFO for self._pool, the ole one is reused,
+            # beacuse some othere might wait for connetion on it.
+            fresh_slots = []
 
             try:
                 # try to fill self._pool ASAP, preventing creation of new connections.
-                # because of LIFO there will be reversed order after this loop
-                while not old_pool.empty():
-                    item = old_pool.get_nowait()
+                # because after this loop LIFO will be in reversed order
+                while not self._pool.empty():
+                    item = self._pool.get_nowait()
                     if cleanup and self._latest_use.get(id(item), 0) < cleanup:
                         self.close_connection(item)
                     elif expires and self._created_at.get(id(item), 0) < expires:
                         self.close_connection(item)
                     else:
-                        self._pool.put_nowait(item)
+                        fresh_slots.append(item)
             except Empty:
                 pass
 
-            if self._pool.qsize() < 2:
-                return
-
-            # Reverse order back (fresh connections shuold be at the front)
-            old_pool, self._pool = self._pool, LifoQueue()
-            try:
-                while not old_pool.empty():
-                    self._pool.put_nowait(old_pool.get_nowait())
-            except Empty:
-                pass
+            # Reverse order back (frestest connections should be at the begining)
+            for conn in reversed(fresh_slots):
+                self._pool.put_nowait(conn)
 
     def get(self):
 
@@ -141,31 +132,34 @@ class AbstractDatabaseConnectionPool(object):
         except Empty:
             pass
 
-        if self._size < self._maxsize:
+        if self._size >= self._maxsize:
             try:
-                self._size += 1
-                conn = self.create_connection()
-            except:
-                self._size -= 1
-                raise
-
-            now = time.time()
-            self._created_at[id(conn)] = now
-            self._latest_use[id(conn)] = now
-            return conn
-        else:
-            try:
-                print(f"All used {self._size} of {self._maxsize} - waiting")
-                item = self._pool.get(timeout=self._maxwait)
-                print("got connection")
-                return item
+                return self._pool.get(timeout=self._maxwait)
             except Empty:
-                raise OperationalError("Too many connections created: {} (maxsize is {})".format(self._size, self._maxsize))
+                pass
+
+        # It is posiible that after waiting self._maxwait time, non connection has been returned
+        # because of cleaning up old ones on put(), so there is not connection but also LIFO is not full.
+        # In that case new connection shouls be created, otherwise exception is risen.
+        if self._size >= self._maxsize:
+            raise OperationalError("Too many connections created: {} (maxsize is {})".format(self._size, self._maxsize))
+
+        try:
+            self._size += 1
+            conn = self.create_connection()
+        except:
+            self._size -= 1
+            raise
+
+        now = time.time()
+        self._created_at[id(conn)] = now
+        self._latest_use[id(conn)] = now
+        return conn
 
 
     def put(self, conn):
         now = time.time()
-        self._pool.put_nowait(conn)
+        self._pool.put(conn)
         self._latest_use[id(conn)] = now
 
         self._cleanup_queue(now)

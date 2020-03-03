@@ -82,12 +82,16 @@ def test_no_expires():
 
     exec_sleep.conns_pids = collections.defaultdict(int)
 
-    pool = PostgresConnectionPool(dsn, maxsize=2, maxwait=0.5, expires=0.1)
+    pool = PostgresConnectionPool(dsn, maxsize=2, maxwait=0.5, expires=0.4)
     for _ in range(8):
         gevent.spawn(exec_sleep)
     gevent.wait()
 
     assert len(exec_sleep.conns_pids) == 2
+
+    gevent.sleep(0.4)
+    pool.cleanup()
+    assert pool._size == 0
 
 
 def test_expires():
@@ -177,7 +181,7 @@ def test_cleanup():
     assert pool._size == 0
 
 
-def test_overflow2():
+def test_overflow_and_cleanup():
     """
     """
 
@@ -190,7 +194,7 @@ def test_overflow2():
 
     exec_sleep.passed = 0
     exec_sleep.raised = 0
-    pool = PostgresConnectionPool(dsn, maxsize=3, maxwait=0.15)
+    pool = PostgresConnectionPool(dsn, maxsize=3, maxwait=0.15, cleanup=0.0001)
     for _ in range(8):
         gevent.spawn(exec_sleep)
     gevent.wait()
