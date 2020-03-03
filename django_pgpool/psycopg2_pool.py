@@ -19,7 +19,7 @@ if sys.version_info[0] >= 3:
     integer_types = (int,)
 else:
     import builtins
-    integer_types = (int, builtins.long)
+    integer_types = (int, builtins.long)  # noqa
 
 
 def gevent_wait_callback(conn, timeout=None):
@@ -155,7 +155,9 @@ class AbstractDatabaseConnectionPool(object):
             return conn
         else:
             try:
+                print(f"All used {self._size} of {self._maxsize} - waiting")
                 item = self._pool.get(timeout=self._maxwait)
+                print("got connection")
                 return item
             except Empty:
                 raise OperationalError("Too many connections created: {} (maxsize is {})".format(self._size, self._maxsize))

@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
-
 import sys
 import time
 import gevent
 import pytest
 import collections
+
 from psycopg2 import OperationalError
 
 from .psycopg2_pool import PostgresConnectionPool
 
-dsn = "dbname=template1 user=postgres"
+
+dsn = "dbname=template1"
 
 
 def test1():
@@ -177,5 +177,28 @@ def test_cleanup():
     assert pool._size == 0
 
 
+def test_overflow2():
+    """
+    """
+
+    def exec_sleep():
+        try:
+            pool.execute('select pg_sleep(0.1);')
+            exec_sleep.passed += 1
+        except OperationalError:
+            exec_sleep.raised += 1
+
+    exec_sleep.passed = 0
+    exec_sleep.raised = 0
+    pool = PostgresConnectionPool(dsn, maxsize=3, maxwait=0.15)
+    for _ in range(8):
+        gevent.spawn(exec_sleep)
+    gevent.wait()
+
+    assert exec_sleep.passed == 6
+    assert exec_sleep.raised == 2
+
+
+
 if __name__ == '__main__':
-    print("usage: python -m pytest -v ./tests.py ")
+    print("usage: python -m pytest -v ./tests.py")
