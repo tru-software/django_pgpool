@@ -9,7 +9,7 @@ try:
 except ImportError:
     from eventlet.semaphore import Semaphore  # noqa
 
-from django.db.backends.postgresql.base import DatabaseWrapper as OriginalDatabaseWrapper, utc_tzinfo_factory
+from django.db.backends.postgresql.base import DatabaseWrapper as OriginalDatabaseWrapper
 
 from django.db.backends.signals import connection_created
 from django.conf import settings
