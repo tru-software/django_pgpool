@@ -14,6 +14,7 @@ from django.db.backends.postgresql.base import DatabaseWrapper as OriginalDataba
 from django.db.backends.signals import connection_created
 from django.conf import settings
 from django.utils.encoding import force_str
+from django.utils.asyncio import async_unsafe
 
 from . import psycopg2_pool as psypool
 from .creation import DatabaseCreation
@@ -45,13 +46,14 @@ class DatabaseWrapperMixin16(object):
                 return self._pool
 
             if self.alias not in connection_pools:
-                self._pool = psypool.PostgresConnectionPool(**self.get_connection_params())
+                self._pool = psypool.PostgresConnectionPool(connect=super().get_new_connection, **self.get_connection_params())
                 connection_pools[self.alias] = self._pool
             else:
                 self._pool = connection_pools[self.alias]
 
         return self._pool
 
+    @async_unsafe
     def get_new_connection(self, conn_params):
         if self.connection is None:
             self.connection = self.pool.get()

@@ -242,15 +242,14 @@ class AbstractDatabaseConnectionPool(object):
 
 class PostgresConnectionPool(AbstractDatabaseConnectionPool):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, **kwargs):
         self.connect = kwargs.pop('connect', connect)
         pool_kwargs = {i: kwargs.pop(i) for i in ('maxsize', 'maxwait', 'expires', 'cleanup') if i in kwargs}
-        self.args = args
         self.kwargs = kwargs
         AbstractDatabaseConnectionPool.__init__(self, **pool_kwargs)
 
     def create_connection(self):
-        return self.connect(*self.args, **self.kwargs)
+        return self.connect(self.kwargs)
 
 
 def main():
